@@ -17,12 +17,15 @@
 OBJECT_DECLARE_SIMPLE_TYPE(C3Adc, C3_ADC)
 struct C3Adc {
     SysBusDevice parent;
-    MemoryRegion regs;
+    MemoryRegion regs, analog_regs;
     qemu_irq irq;
     QEMUTimer *timer;
     uint32_t ctrl, ctrl2, onetime, clkm, arb, raw, ena, data;
     uint32_t channel, attenuation, pending;
     uint64_t requests, sample_code;
+    uint32_t pause_on_request;
+    uint32_t analog_ctrl[2], analog_conf[3], init_code, dref, calibration_route;
+    uint8_t sar[8];
 };
 static void update(C3Adc *s) { qemu_set_irq(s->irq, !!(s->raw & s->ena)); }
 static void complete(void *opaque)
@@ -110,9 +113,13 @@ static void write_reg(void *opaque, hwaddr addr, uint64_t value, unsigned size)
             s->requests++;
             s->pending = 1;
             s->sample_code = UINT64_MAX;
-            qemu_log_mask(LOG_UNIMP,
+            if (s->pause_on_request) {
+                vm_stop(RUN_STATE_PAUSED);
+            } else {
+                qemu_log_mask(LOG_UNIMP,
                 "SMARTVAPE_UNMODELED ADC analog request=%" PRIu64 " channel=%u attenuation=%u needs transfer/calibration/timing backend\n",
                 s->requests, s->channel, s->attenuation);
+            }
         }
         break;
     }
@@ -126,6 +133,49 @@ static const MemoryRegionOps ops = {
     .read = read_reg, .write = write_reg, .endianness = DEVICE_LITTLE_ENDIAN,
     .valid = { .min_access_size = 4, .max_access_size = 4 },
 };
+/* Internal analog bus command layout verified against the pinned C3 ROM:
+ * read routine 0x40038e58, write routine 0x40039170; data[23:16], register[15:8],
+ * block[7:0], write bit24, busy bit25, execute bit26. esp-hal C3 regi2c.rs
+ * identifies SAR block 0x69 registers. This is a zero-latency register transport,
+ * not PLL/radio calibration or analog settling. Unsupported blocks remain gaps.
+ * Configuration addresses: ESP-IDF v5.4.2 soc/esp32c3/include/soc/regi2c_defs.h.
+ */
+static uint64_t analog_read(void *opaque, hwaddr addr, unsigned size)
+{
+    C3Adc *s = opaque;
+    if (addr < 8) { return s->analog_ctrl[addr / 4]; }
+    if (addr >= 0x40 && addr <= 0x48) { return s->analog_conf[(addr - 0x40) / 4]; }
+    qemu_log_mask(LOG_UNIMP, "SMARTVAPE_UNMODELED analog bus read offset=%" HWADDR_PRIx "\n", addr);
+    return 0;
+}
+static void analog_write(void *opaque, hwaddr addr, uint64_t value, unsigned size)
+{
+    C3Adc *s = opaque;
+    if (addr >= 0x40 && addr <= 0x48) {
+        s->analog_conf[(addr - 0x40) / 4] = value;
+        return;
+    }
+    if (addr < 8) {
+        unsigned block = value & 0xff, reg = (value >> 8) & 0xff;
+        s->analog_ctrl[addr / 4] = value & ~(BIT(25) | BIT(26));
+        if (!(value & BIT(26))) { return; }
+        if (block != 0x69 || reg >= 8) {
+            qemu_log_mask(LOG_UNIMP, "SMARTVAPE_UNMODELED analog bus block=%x register=%u\n", block, reg);
+            return;
+        }
+        if (value & BIT(24)) { s->sar[reg] = value >> 16; }
+        s->analog_ctrl[addr / 4] = (s->analog_ctrl[addr / 4] & ~0xff0000) | (s->sar[reg] << 16);
+        s->init_code = s->sar[0] | ((s->sar[1] & 15) << 8);
+        s->dref = (s->sar[2] >> 4) & 7;
+        s->calibration_route = (s->sar[7] >> 4) & 3;
+        return;
+    }
+    qemu_log_mask(LOG_UNIMP, "SMARTVAPE_UNMODELED analog bus write offset=%" HWADDR_PRIx "\n", addr);
+}
+static const MemoryRegionOps analog_ops = {
+    .read = analog_read, .write = analog_write, .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 4, .max_access_size = 4 },
+};
 static void reset(Object *obj, ResetType type)
 {
     C3Adc *s = C3_ADC(obj);
@@ -136,6 +186,10 @@ static void reset(Object *obj, ResetType type)
     s->clkm = 0x04; /* esp32c3 0.32.2 APB_SARADC.CLKM_CONF */
     s->raw = s->ena = s->data = s->pending = 0;
     s->sample_code = UINT64_MAX;
+    memset(s->sar, 0, sizeof(s->sar));
+    memset(s->analog_ctrl, 0, sizeof(s->analog_ctrl));
+    memset(s->analog_conf, 0, sizeof(s->analog_conf));
+    s->init_code = s->dref = s->calibration_route = 0;
     timer_del(s->timer);
     update(s);
 }
@@ -144,12 +198,18 @@ static void init(Object *obj)
     C3Adc *s = C3_ADC(obj);
     memory_region_init_io(&s->regs, obj, &ops, s, "c3-adc", 0x400);
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->regs);
+    memory_region_init_io(&s->analog_regs, obj, &analog_ops, s, "c3-analog-bus", 0x4c);
+    sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->analog_regs);
     sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq);
     s->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, complete, s);
     object_property_add_uint32_ptr(obj, "pending", &s->pending, OBJ_PROP_FLAG_READ);
     object_property_add_uint32_ptr(obj, "channel", &s->channel, OBJ_PROP_FLAG_READ);
     object_property_add_uint32_ptr(obj, "attenuation", &s->attenuation, OBJ_PROP_FLAG_READ);
     object_property_add_uint64_ptr(obj, "requests", &s->requests, OBJ_PROP_FLAG_READ);
+    object_property_add_uint32_ptr(obj, "pause-on-request", &s->pause_on_request, OBJ_PROP_FLAG_READWRITE);
+    object_property_add_uint32_ptr(obj, "init-code", &s->init_code, OBJ_PROP_FLAG_READ);
+    object_property_add_uint32_ptr(obj, "dref", &s->dref, OBJ_PROP_FLAG_READ);
+    object_property_add_uint32_ptr(obj, "calibration-route", &s->calibration_route, OBJ_PROP_FLAG_READ);
     object_property_add(obj, "sample-code", "uint64", NULL, set_code, NULL, NULL);
     object_property_add(obj, "complete-after-ns", "uint64", NULL, set_delay, NULL, NULL);
 }

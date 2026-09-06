@@ -487,6 +487,8 @@ static void esp32c3_machine_init(MachineState *machine)
         sysbus_realize_and_unref(SYS_BUS_DEVICE(adc), &error_fatal);
         memory_region_add_subregion_overlap(sys_mem, 0x60040000,
             sysbus_mmio_get_region(SYS_BUS_DEVICE(adc), 0), 0);
+        memory_region_add_subregion_overlap(sys_mem, 0x6000e000,
+            sysbus_mmio_get_region(SYS_BUS_DEVICE(adc), 1), 0);
         sysbus_connect_irq(SYS_BUS_DEVICE(adc), 0,
             qdev_get_gpio_in(intmatrix_dev, ETS_APB_ADC_INTR_SOURCE));
     }

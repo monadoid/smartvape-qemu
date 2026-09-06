@@ -11,6 +11,7 @@
 #include "qapi/visitor.h"
 #include "hw/irq.h"
 #include "hw/gpio/esp32c3_gpio.h"
+#include "sysemu/runstate.h"
 
 /* Bits 22..25 exist in the register fields but are explicitly invalid in TRM
  * 5.5.3. Never expose them as bonded output pins. */
@@ -84,6 +85,7 @@ static void update(ESP32C3GPIOState *s)
         } else if (!awake || (mux & BIT(15)) || (s->pin[pin] & 0x1b)) {
             known = false; /* sleep/filter/synchronizer not implemented */
         }
+        if ((mux & BIT(9)) && (s->pad_unknown & bit)) { known = false; }
         if (known) {
             s->input_known |= bit;
             if (level) { s->input |= bit; }
@@ -102,6 +104,10 @@ static void update(ESP32C3GPIOState *s)
      * and unsupported routing. This is NOT a MOSFET or power model. */
     uint32_t changed = (old_drive ^ s->drive_level) |
                        (old_enable ^ s->drive_enable) | (old_valid ^ s->drive_valid);
+    if (changed & BIT(7)) {
+        s->gpio7_changes++;
+        if (s->pause_on_gpio7 && runstate_is_running()) { vm_stop(RUN_STATE_PAUSED); }
+    }
     for (unsigned pin = 6; pin <= 7; pin++) {
         if (changed & BIT(pin)) {
             int drive = !(s->drive_valid & BIT(pin)) ? -2 :
@@ -116,6 +122,19 @@ static void rmt_level(void *opaque, int channel, int level)
 {
     ESP32C3GPIOState *s = opaque;
     s->rmt_level = (s->rmt_level & ~BIT(channel)) | (level ? BIT(channel) : 0);
+    update(s);
+}
+
+static void set_unknown(Object *obj, Visitor *v, const char *name, void *opaque, Error **errp)
+{
+    ESP32C3GPIOState *s = ESP32C3_GPIO(obj);
+    uint32_t mask;
+    if (!visit_type_uint32(v, name, &mask, errp)) { return; }
+    if (runstate_is_running() || (mask & ~PAD_MASK)) {
+        error_setg(errp, "Pause before changing unknown electrical inputs");
+        return;
+    }
+    s->pad_unknown = mask;
     update(s);
 }
 
@@ -261,6 +280,9 @@ static void esp32c3_gpio_init(Object *obj)
     object_property_add_uint32_ptr(obj, "drive-enable", &s->drive_enable, OBJ_PROP_FLAG_READ);
     object_property_add_uint32_ptr(obj, "drive-valid", &s->drive_valid, OBJ_PROP_FLAG_READ);
     object_property_add_uint32_ptr(obj, "input-known", &s->input_known, OBJ_PROP_FLAG_READ);
+    object_property_add_uint32_ptr(obj, "pause-on-gpio7", &s->pause_on_gpio7, OBJ_PROP_FLAG_READWRITE);
+    object_property_add(obj, "unknown-pad-mask", "uint32", NULL, set_unknown, NULL, NULL);
+    object_property_add_uint64_ptr(obj, "gpio7-changes", &s->gpio7_changes, OBJ_PROP_FLAG_READ);
     memory_region_init_io(&s->mux_regs, obj, &mux_ops, s, "gpio-iomux", 22 * 4);
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->mux_regs);
 }
