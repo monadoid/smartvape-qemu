@@ -23,6 +23,13 @@
 
 static uint64_t esp32_gpio_read(void *opaque, hwaddr addr, unsigned int size)
 {
+    static bool seen[0x1000];
+    if (addr < sizeof(seen) && addr != A_GPIO_STRAP && !seen[addr]) {
+        seen[addr] = true;
+        qemu_log_mask(LOG_UNIMP, "SMARTVAPE_UNMODELED read 0x%08" HWADDR_PRIx " size=%u (esp32_gpio)\n",
+                      (hwaddr)0x60004000 + addr, size);
+    }
+
     Esp32GpioState *s = ESP32_GPIO(opaque);
     uint64_t r = 0;
     switch (addr) {
@@ -39,6 +46,13 @@ static uint64_t esp32_gpio_read(void *opaque, hwaddr addr, unsigned int size)
 static void esp32_gpio_write(void *opaque, hwaddr addr,
                        uint64_t value, unsigned int size)
 {
+    static bool seen[0x1000];
+    if (addr < sizeof(seen) && !seen[addr]) {
+        seen[addr] = true;
+        qemu_log_mask(LOG_UNIMP, "SMARTVAPE_UNMODELED write 0x%08" HWADDR_PRIx " size=%u (esp32_gpio)\n",
+                      (hwaddr)0x60004000 + addr, size);
+    }
+
 }
 
 static const MemoryRegionOps uart_ops = {

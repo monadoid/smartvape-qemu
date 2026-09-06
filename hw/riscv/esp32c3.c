@@ -145,6 +145,14 @@ static bool addr_in_range(hwaddr addr, hwaddr start, hwaddr end)
 
 static uint64_t esp32c3_io_read(void *opaque, hwaddr addr, unsigned int size)
 {
+    /* Audit each fallback register once. This does not implement the device. */
+    static bool seen[0xd1000];
+    if (addr < sizeof(seen) && !seen[addr]) {
+        seen[addr] = true;
+        qemu_log_mask(LOG_UNIMP, "SMARTVAPE_UNMODELED read 0x%08" HWADDR_PRIx " size=%u\n",
+                      ESP32C3_IO_START_ADDR + addr, size);
+    }
+
     if (addr_in_range(addr + ESP32C3_IO_START_ADDR, DR_REG_RTC_I2C_BASE, DR_REG_RTC_I2C_BASE + 0x100)) {
         return (uint32_t) 0xffffff;
     } else if (addr + ESP32C3_IO_START_ADDR == DR_REG_SYSCON_BASE + A_SYSCON_ORIGIN_REG) {
@@ -170,6 +178,13 @@ static uint64_t esp32c3_io_read(void *opaque, hwaddr addr, unsigned int size)
 
 static void esp32c3_io_write(void *opaque, hwaddr addr, uint64_t value, unsigned int size)
 {
+    static bool seen[0xd1000];
+    if (addr < sizeof(seen) && !seen[addr]) {
+        seen[addr] = true;
+        qemu_log_mask(LOG_UNIMP, "SMARTVAPE_UNMODELED write 0x%08" HWADDR_PRIx " size=%u value=0x%" PRIx64 "\n",
+                      ESP32C3_IO_START_ADDR + addr, size, value);
+    }
+
 #if ESP32C3_IO_WARNING
         warn_report("[ESP32-C3] Unsupported write $%08lx = %08lx\n", ESP32C3_IO_START_ADDR + addr, value);
 #endif

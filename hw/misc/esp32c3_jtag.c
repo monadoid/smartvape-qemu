@@ -18,6 +18,13 @@
 
 static uint64_t esp32c3_jtag_read(void *opaque, hwaddr addr, unsigned int size)
 {
+    static bool seen[0x1000];
+    if (addr < sizeof(seen) && !seen[addr]) {
+        seen[addr] = true;
+        qemu_log_mask(LOG_UNIMP, "SMARTVAPE_UNMODELED read 0x%08" HWADDR_PRIx " size=%u (esp32c3_jtag)\n",
+                      (hwaddr)0x60043000 + addr, size);
+    }
+
     ESP32C3UsbJtagState *s = ESP32C3_JTAG(opaque);
     (void) s;
     return 0;
@@ -25,6 +32,13 @@ static uint64_t esp32c3_jtag_read(void *opaque, hwaddr addr, unsigned int size)
 
 static void esp32c3_jtag_write(void *opaque, hwaddr addr, uint64_t value, unsigned int size)
 {
+    static bool seen[0x1000];
+    if (addr < sizeof(seen) && !seen[addr]) {
+        seen[addr] = true;
+        qemu_log_mask(LOG_UNIMP, "SMARTVAPE_UNMODELED write 0x%08" HWADDR_PRIx " size=%u (esp32c3_jtag)\n",
+                      (hwaddr)0x60043000 + addr, size);
+    }
+
     ESP32C3UsbJtagState *s = ESP32C3_JTAG(opaque);
     (void) s;
 }
