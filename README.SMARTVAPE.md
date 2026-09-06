@@ -15,7 +15,17 @@ manual and the esp32c3 0.32.2 register definitions. QTest read/write sequences
 exercise reset values, set/clear semantics, masking and independent output-enable
 state from the Smart Vape Rust runner.
 
-This is bring-up work, not a complete board emulator. GPIO pad routing,
+GPIO5 now accepts an externally driven digital input, models its awake input
+enable and edge/level interrupt latch, and connects its CPU interrupt to the
+upstream interrupt matrix. QTest uses the named `pad` input; QMP can drive the
+same path through `/machine/gpio` property `pad5-level`. IO_MUX mapping covers
+only GPIO5; other mux and pin registers retain fallback diagnostics. Global
+input/status reads cover this slice only, not other pins. Normal digital input
+tests do not validate synchronizer delay, analog thresholds, filters, NMI,
+sleep/wakeup, contact dynamics or supply behavior. Unsupported GPIO5 modes log
+diagnostics. Source: ESP32-C3 TRM v1.4 chapter 5 and production esp32c3 0.32.2 PAC.
+
+This is bring-up work, not a complete board emulator. Other GPIO pad routing,
 interrupts, ADC, RMT, USB behavior and electrical power models remain incomplete.
 An unsupported access is not a successful test. Existing upstream behavior may
 also contain approximations that have not yet been audited.
