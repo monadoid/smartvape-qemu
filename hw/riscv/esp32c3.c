@@ -282,6 +282,11 @@ static void esp32c3_init_openeth(Esp32C3MachineState *ms)
 static void esp32c3_load_firmware(MachineState *machine)
 {
     Esp32C3MachineState *ms = ESP32C3_MACHINE(machine);
+
+    /* Host-only scenario control; never mapped into guest memory. */
+    Object *test_clock = object_new("smartvape-test-clock");
+    object_property_add_child(OBJECT(machine), "scenario-clock", test_clock);
+    object_unref(test_clock);
     const char *bios_filename = NULL;
 
     if (machine->firmware) {
