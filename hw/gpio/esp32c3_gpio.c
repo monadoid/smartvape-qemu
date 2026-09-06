@@ -105,8 +105,8 @@ static void update(ESP32C3GPIOState *s)
     uint32_t changed = (old_drive ^ s->drive_level) |
                        (old_enable ^ s->drive_enable) | (old_valid ^ s->drive_valid);
     if (changed & BIT(7)) {
-        s->gpio7_changes++;
-        if (s->pause_on_gpio7 && runstate_is_running()) { vm_stop(RUN_STATE_PAUSED); }
+        s->board_io_changes++;
+        if (s->pause_on_board_io && runstate_is_running()) { vm_stop(RUN_STATE_PAUSED); }
     }
     for (unsigned pin = 6; pin <= 7; pin++) {
         if (changed & BIT(pin)) {
@@ -183,11 +183,16 @@ static uint64_t mux_read(void *opaque, hwaddr addr, unsigned size)
 static void mux_write(void *opaque, hwaddr addr, uint64_t value, unsigned size)
 {
     ESP32C3GPIOState *s = opaque;
+    bool pod_config_changed = addr == 4 && s->mux[1] != (value & 0xffff);
     s->mux[addr / 4] = value & 0xffff;
     if (value & (BIT(15) | BIT(1))) {
         qemu_log_mask(LOG_UNIMP, "SMARTVAPE_UNMODELED GPIO%u filter/sleep configuration\n", (unsigned)addr / 4);
     }
     update(s);
+    if (pod_config_changed) {
+        s->board_io_changes++;
+        if (s->pause_on_board_io && runstate_is_running()) { vm_stop(RUN_STATE_PAUSED); }
+    }
 }
 
 static const MemoryRegionOps mux_ops = {
@@ -280,9 +285,9 @@ static void esp32c3_gpio_init(Object *obj)
     object_property_add_uint32_ptr(obj, "drive-enable", &s->drive_enable, OBJ_PROP_FLAG_READ);
     object_property_add_uint32_ptr(obj, "drive-valid", &s->drive_valid, OBJ_PROP_FLAG_READ);
     object_property_add_uint32_ptr(obj, "input-known", &s->input_known, OBJ_PROP_FLAG_READ);
-    object_property_add_uint32_ptr(obj, "pause-on-gpio7", &s->pause_on_gpio7, OBJ_PROP_FLAG_READWRITE);
+    object_property_add_uint32_ptr(obj, "pause-on-board-io", &s->pause_on_board_io, OBJ_PROP_FLAG_READWRITE);
     object_property_add(obj, "unknown-pad-mask", "uint32", NULL, set_unknown, NULL, NULL);
-    object_property_add_uint64_ptr(obj, "gpio7-changes", &s->gpio7_changes, OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(obj, "board-io-changes", &s->board_io_changes, OBJ_PROP_FLAG_READ);
     memory_region_init_io(&s->mux_regs, obj, &mux_ops, s, "gpio-iomux", 22 * 4);
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->mux_regs);
 }
