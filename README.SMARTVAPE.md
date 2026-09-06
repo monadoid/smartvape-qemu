@@ -39,6 +39,14 @@ gate voltage or load-current simulation. Tests do not validate synchronizer
 delay, analog thresholds, filters, NMI, sleep/wakeup, contact dynamics, JTAG
 ownership, pad hold or supply behavior. Unsupported modes retain diagnostics.
 
+Optional host test control: `-object smartvape-test-clock,id=scenario-clock`.
+The object exposes `now-ns`, `stop-at-ns` and `stops` through QMP. While stopped,
+set a future deadline then continue; a QEMU virtual timer stops the VM at that
+boundary. The Rust runner checks the observed time and stop counter before
+injecting inputs. This object has no guest-visible registers or interrupts and
+does not emulate an ESP32 peripheral. Host waits are only completion polling;
+the `icount` timebase still does not claim cycle-accurate silicon timing.
+
 This is bring-up work, not a complete board emulator. Peripheral GPIO routing,
 ADC, RMT, USB behavior and electrical power models remain incomplete.
 An unsupported access is not a successful test. Existing upstream behavior may
