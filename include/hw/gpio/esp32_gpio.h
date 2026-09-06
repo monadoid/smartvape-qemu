@@ -24,4 +24,6 @@ typedef struct Esp32GpioState {
 
 typedef struct Esp32GpioClass {
     SysBusDeviceClass parent_class;
+    bool (*read_reg)(Esp32GpioState *s, hwaddr addr, uint64_t *value);
+    bool (*write_reg)(Esp32GpioState *s, hwaddr addr, uint64_t value);
 } Esp32GpioClass;

@@ -17,6 +17,8 @@
 
 typedef struct ESP32C3State {
     Esp32GpioState parent;
+    uint32_t out;
+    uint32_t enable;
 } ESP32C3GPIOState;
 
 typedef struct ESP32C3GPIOClass {
