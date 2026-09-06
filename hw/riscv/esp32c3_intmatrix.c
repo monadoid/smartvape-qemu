@@ -113,6 +113,10 @@ static uint64_t esp32c3_intmatrix_read(void* opaque, hwaddr addr, unsigned int s
 
     if (index < ESP32C3_INT_MATRIX_INPUTS) {
         r = s->irq_map[index];
+    } else if (addr == 0xf8 || addr == 0xfc) {
+        /* TRM v1.4 registers 8.52/8.53: raw peripheral source status.
+         * esp-hal uses these to identify sources sharing a CPU interrupt. */
+        r = s->irq_levels >> (addr == 0xf8 ? 0 : 32);
     } else if (index >= ESP32C3_INTMATRIX_IO_PRIO_START && index < ESP32C3_INTMATRIX_IO_PRIO_END) {
         /* Interrupts start at 1, omit the first entry */
         const uint32_t line = index - ESP32C3_INTMATRIX_IO_PRIO_START + 1;

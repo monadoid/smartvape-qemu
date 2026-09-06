@@ -9,6 +9,9 @@ Implemented changes:
 - Implement the C3 GPIO output and output-enable latches, including their atomic
   set/clear aliases and reset values, for 32-bit accesses. The register data
   fields cover bits 0..25; this does not imply 26 bonded GPIO pads.
+- Return raw source status from both interrupt-matrix status registers (TRM
+  v1.4 registers 8.52/8.53). Upstream returned zero, preventing the Rust HAL
+  from identifying an asserted source and causing repeated interrupt entry.
 
 Register behavior is cross-checked against the ESP32-C3 technical reference
 manual and the esp32c3 0.32.2 register definitions. QTest read/write sequences
