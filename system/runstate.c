@@ -274,6 +274,15 @@ StatusInfo *qmp_query_status(Error **errp)
     return info;
 }
 
+bool qemu_vmstop_pending(void)
+{
+    bool pending;
+    qemu_mutex_lock(&vmstop_lock);
+    pending = vmstop_requested != RUN_STATE__MAX;
+    qemu_mutex_unlock(&vmstop_lock);
+    return pending;
+}
+
 bool qemu_vmstop_requested(RunState *r)
 {
     qemu_mutex_lock(&vmstop_lock);

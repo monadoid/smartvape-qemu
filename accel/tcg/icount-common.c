@@ -299,7 +299,9 @@ void icount_start_warp_timer(void)
      * Nothing to do if the VM is stopped: QEMU_CLOCK_VIRTUAL timers
      * do not fire, so computing the deadline does not make sense.
      */
-    if (!runstate_is_running()) {
+    /* A vCPU timer may have requested vm_stop before the main loop has
+     * acknowledged it. Do not jump beyond that stop's virtual timestamp. */
+    if (!runstate_is_running() || qemu_vmstop_pending()) {
         return;
     }
 

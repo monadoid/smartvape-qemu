@@ -283,10 +283,6 @@ static void esp32c3_load_firmware(MachineState *machine)
 {
     Esp32C3MachineState *ms = ESP32C3_MACHINE(machine);
 
-    /* Host-only scenario control; never mapped into guest memory. */
-    Object *test_clock = object_new("smartvape-test-clock");
-    object_property_add_child(OBJECT(machine), "scenario-clock", test_clock);
-    object_unref(test_clock);
     const char *bios_filename = NULL;
 
     if (machine->firmware) {
@@ -360,6 +356,11 @@ static void esp32c3_machine_init(MachineState *machine)
 
     /* Re-use the macro that checks and casts any generic/parent class to the real child instance */
     Esp32C3MachineState *ms = ESP32C3_MACHINE(machine);
+
+    /* Host-only scenario control; never mapped into guest memory. */
+    Object *test_clock = object_new("smartvape-test-clock");
+    object_property_add_child(OBJECT(machine), "scenario-clock", test_clock);
+    object_unref(test_clock);
 
     /* Initialize SoC */
     object_initialize_child(OBJECT(ms), "soc", &ms->soc, TYPE_ESP_RISCV_CPU);
