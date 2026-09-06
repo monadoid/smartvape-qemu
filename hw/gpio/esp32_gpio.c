@@ -25,7 +25,7 @@ static uint64_t esp32_gpio_read(void *opaque, hwaddr addr, unsigned int size)
 {
     Esp32GpioClass *klass = ESP32_GPIO_GET_CLASS(opaque);
     uint64_t result;
-    if (klass->read_reg && klass->read_reg(opaque, addr, &result)) {
+    if (size == 4 && klass->read_reg && klass->read_reg(opaque, addr, &result)) {
         return result;
     }
     static bool seen[0x1000];
@@ -52,7 +52,7 @@ static void esp32_gpio_write(void *opaque, hwaddr addr,
                        uint64_t value, unsigned int size)
 {
     Esp32GpioClass *klass = ESP32_GPIO_GET_CLASS(opaque);
-    if (klass->write_reg && klass->write_reg(opaque, addr, value)) {
+    if (size == 4 && klass->write_reg && klass->write_reg(opaque, addr, value)) {
         return;
     }
     static bool seen[0x1000];
