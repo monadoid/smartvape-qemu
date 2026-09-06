@@ -240,6 +240,7 @@ static void esp32c3_init_spi_flash(Esp32C3MachineState *ms, BlockBackend* blk)
 
     /* Create the SPI flash model */
     DeviceState *flash_dev = qdev_new(flash_model);
+    object_property_add_child(OBJECT(ms), "flash", OBJECT(flash_dev));
     qdev_prop_set_drive(flash_dev, "drive", blk);
     qdev_prop_set_uint8(flash_dev, "cs", 1);
 
@@ -446,7 +447,6 @@ static void esp32c3_machine_init(MachineState *machine)
     object_initialize_child(OBJECT(machine), "rtccntl", &ms->rtccntl, TYPE_ESP32C3_RTC_CNTL);
     object_initialize_child(OBJECT(machine), "jtag", &ms->jtag, TYPE_ESP32C3_JTAG);
     object_initialize_child(OBJECT(machine), "rmt", &ms->rmt, TYPE_ESP32C3_RMT);
-    object_property_add_alias(OBJECT(machine), "usb-console", OBJECT(&ms->jtag), "chardev");
     object_initialize_child(OBJECT(machine), "rgb", &ms->rgb, TYPE_ESP_RGB);
     object_initialize_child(OBJECT(machine), "twai", &ms->twai, TYPE_ESP32C3_TWAI);
 
@@ -481,6 +481,15 @@ static void esp32c3_machine_init(MachineState *machine)
     }
 
     /* RTC CNTL realization */
+    {
+        DeviceState *adc = qdev_new("esp32c3.adc");
+        object_property_add_child(OBJECT(machine), "adc", OBJECT(adc));
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(adc), &error_fatal);
+        memory_region_add_subregion_overlap(sys_mem, 0x60040000,
+            sysbus_mmio_get_region(SYS_BUS_DEVICE(adc), 0), 0);
+        sysbus_connect_irq(SYS_BUS_DEVICE(adc), 0,
+            qdev_get_gpio_in(intmatrix_dev, ETS_APB_ADC_INTR_SOURCE));
+    }
     {
         sysbus_realize(SYS_BUS_DEVICE(&ms->rmt), &error_fatal);
         for (int i = 0; i < 2; i++) {

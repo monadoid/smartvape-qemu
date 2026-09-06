@@ -35,6 +35,8 @@
 #include "qemu/module.h"
 #include "qemu/error-report.h"
 #include "qapi/error.h"
+#include "sysemu/runstate.h"
+#include "qemu/timer.h"
 #include "trace.h"
 #include "qom/object.h"
 #include "m25p80_sfdp.h"
@@ -527,6 +529,10 @@ struct Flash {
 
     const FlashPartInfo *pi;
 
+    /* Host-only discrete fault fixture. Not a flash timing/voltage model. */
+    uint32_t cut_after_erase_offset, faulted;
+    uint64_t erase_count, programmed_bytes;
+
 };
 
 struct M25P80Class {
@@ -651,7 +657,17 @@ static void flash_erase(Flash *s, int offset, FlashCMD cmd)
         return;
     }
     memset(s->storage + offset, 0xff, len);
+    s->erase_count++;
     flash_sync_area(s, offset, len);
+    if (s->cut_after_erase_offset >= offset &&
+        s->cut_after_erase_offset - offset < len) {
+        s->faulted = 1;
+        s->cut_after_erase_offset = UINT32_MAX;
+        qemu_log_mask(LOG_UNIMP,
+            "SMARTVAPE_FLASH discrete_cut time_ns=%" PRId64 " offset=%d length=%u after_completed_erase=1\n",
+            qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL), offset, len);
+        vm_stop(RUN_STATE_PAUSED);
+    }
 }
 
 static inline void flash_sync_dirty(Flash *s, int64_t newpage)
@@ -709,6 +725,7 @@ void flash_write8(Flash *s, uint32_t addr, uint8_t data)
 
     flash_sync_dirty(s, page);
     s->dirty_page = page;
+    s->programmed_bytes++;
 }
 
 static inline int get_addr_length(Flash *s)
@@ -1575,6 +1592,7 @@ static uint32_t m25p80_transfer8(SSIPeripheral *ss, uint32_t tx)
 {
     Flash *s = M25P80(ss);
     uint32_t r = 0;
+    if (s->faulted) { return 0xff; }
 
     trace_m25p80_transfer(s, s->state, s->len, s->needed_bytes, s->pos,
                           s->cur_addr, (uint8_t)tx);
@@ -1671,6 +1689,21 @@ static void m25p80_write_protect_pin_irq_handler(void *opaque, int n, int level)
     s->wp_level = !!level;
 }
 
+static void fixture_flush(Object *obj, bool value, Error **errp)
+{
+    Flash *s = M25P80(obj);
+    if (!value || runstate_is_running() || !s->blk || !blk_is_writable(s->blk)) {
+        error_setg(errp, "Pause the VM and provide a writable per-run flash image before flushing");
+        return;
+    }
+    /* Snapshot the model's exact byte state after pending backing writes finish.
+     * This is host persistence, not a claim about silicon write timing. */
+    blk_drain(s->blk);
+    int ret = blk_pwrite(s->blk, 0, s->size, s->storage, 0);
+    if (!ret) { ret = blk_flush(s->blk); }
+    if (ret < 0) { error_setg_errno(errp, -ret, "Could not persist emulated flash"); }
+}
+
 static void m25p80_realize(SSIPeripheral *ss, Error **errp)
 {
     Flash *s = M25P80(ss);
@@ -1681,6 +1714,12 @@ static void m25p80_realize(SSIPeripheral *ss, Error **errp)
 
     s->size = s->pi->sector_size * s->pi->n_sectors;
     s->dirty_page = -1;
+    s->cut_after_erase_offset = UINT32_MAX;
+    object_property_add_uint32_ptr(OBJECT(s), "cut-after-erase-offset", &s->cut_after_erase_offset, OBJ_PROP_FLAG_READWRITE);
+    object_property_add_uint32_ptr(OBJECT(s), "faulted", &s->faulted, OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(OBJECT(s), "erase-count", &s->erase_count, OBJ_PROP_FLAG_READ);
+    object_property_add_uint64_ptr(OBJECT(s), "programmed-bytes", &s->programmed_bytes, OBJ_PROP_FLAG_READ);
+    object_property_add_bool(OBJECT(s), "flush", NULL, fixture_flush);
 
     if (s->blk) {
         uint64_t perm = BLK_PERM_CONSISTENT_READ |
@@ -1710,6 +1749,7 @@ static void m25p80_realize(SSIPeripheral *ss, Error **errp)
 static void m25p80_reset(DeviceState *d)
 {
     Flash *s = M25P80(d);
+    s->faulted = 0;
 
     s->wp_level = true;
     s->status_register_write_disabled = false;
