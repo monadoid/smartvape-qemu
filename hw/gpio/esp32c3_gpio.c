@@ -99,7 +99,7 @@ static bool c3_read(Esp32GpioState *parent, hwaddr addr, uint64_t *value)
     case 0x20: *value = s->enable; return true;
     case 0x3c: *value = s->input5 ? PIN5_BIT : 0; return true;
     case 0x44: *value = s->status; return true;
-    case 0x5c: *value = (s->pin5 & (1U << 13)) ? s->status : 0; return true;
+    case 0x5c: *value = (s->pin5 & (1U << 13)) ? (s->status & PIN5_BIT) : 0; return true;
     case 0x88: *value = s->pin5; return true;
     default: return false;
     }
