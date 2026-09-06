@@ -19,12 +19,14 @@ typedef struct ESP32C3State {
     Esp32GpioState parent;
     uint32_t out;
     uint32_t enable;
-    MemoryRegion button_mux;
-    uint32_t pin5;
-    uint32_t mux5;
+    MemoryRegion mux_regs;
+    uint32_t pin[22];
+    uint32_t mux[22];
+    uint32_t out_sel[22];
     uint32_t status;
-    bool pad5;
-    bool input5;
+    uint32_t pad_level, pad_driven;
+    uint32_t input, input_known, reported_unknown;
+    uint32_t drive_level, drive_enable, drive_valid;
 } ESP32C3GPIOState;
 
 typedef struct ESP32C3GPIOClass {

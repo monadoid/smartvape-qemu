@@ -1,106 +1,175 @@
-/*
- * ESP32-C3 GPIO emulation
- *
+/* ESP32-C3 GPIO. GPL-2.0-or-later; based on Espressif's GPIO device.
  * Copyright (c) 2023 Espressif Systems (Shanghai) Co. Ltd.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 or
- * (at your option) any later version.
+ * Sources: ESP32-C3 TRM v1.4 chapter 5 and esp32c3 PAC 0.32.2.
+ * Awake digital GPIO only: no pad voltage, synchronizer, sleep or NMI model.
  */
-
 #include "qemu/osdep.h"
 #include "qemu/log.h"
 #include "qemu/error-report.h"
+#include "qemu/timer.h"
 #include "qapi/error.h"
-#include "hw/hw.h"
-#include "hw/sysbus.h"
-#include "hw/registerfields.h"
+#include "qapi/visitor.h"
 #include "hw/irq.h"
-#include "hw/qdev-properties.h"
 #include "hw/gpio/esp32c3_gpio.h"
 
+/* Bits 22..25 exist in the register fields but are explicitly invalid in TRM
+ * 5.5.3. Never expose them as bonded output pins. */
+#define DATA_MASK 0x03ffffff
+#define PAD_MASK 0x003fffff
 
-/* GPIO output latches only. Pad routing and interrupts remain unsupported.
- * Source: ESP32-C3 TRM, GPIO_OUT/ENABLE and W1TS/W1TC registers;
- * cross-checked against esp32c3 PAC 0.32.2 gpio.rs and gpio/out.rs.
- * The register data field is 26 bits. This does not assert 26 bonded pads.
- */
-#define GPIO_DATA_MASK 0x03ffffff
-
-/* First input slice: GPIO5, normal awake operation with an externally driven
- * digital pad. TRM v1.4 chapter 5: IN, STATUS, PCPU_INT, PIN5 and IO_MUX_GPIO5.
- * No analog thresholds, synchronizer delays, filter, sleep or NMI model. */
-#define PIN5_BIT (1U << 5)
-
-static void input_update(ESP32C3GPIOState *s)
+static uint32_t cpu_status(ESP32C3GPIOState *s)
 {
-    bool old = s->input5;
-    unsigned type = (s->pin5 >> 7) & 7;
-    s->input5 = s->pad5 && (s->mux5 & (1U << 9));
-    if ((type == 1 && !old && s->input5) ||
-        (type == 2 && old && !s->input5) ||
-        (type == 3 && old != s->input5) ||
-        (type == 4 && !s->input5) || (type == 5 && s->input5)) {
-        s->status |= PIN5_BIT;
+    uint32_t enabled = 0;
+    for (int pin = 0; pin < 22; pin++) {
+        if (s->pin[pin] & BIT(13)) {
+            enabled |= BIT(pin);
+        }
     }
-    qemu_set_irq(s->parent.irq,
-                 (s->pin5 & (1U << 13)) && (s->status & PIN5_BIT));
+    return enabled & s->status;
+}
+
+static void update(ESP32C3GPIOState *s)
+{
+    uint32_t old_input = s->input;
+    uint32_t old_known = s->input_known;
+    uint32_t old_drive = s->drive_level;
+    uint32_t old_enable = s->drive_enable;
+    uint32_t old_valid = s->drive_valid;
+    s->input = s->input_known = 0;
+    s->drive_enable = s->drive_level = s->drive_valid = 0;
+    for (int pin = 0; pin < 22; pin++) {
+        uint32_t bit = BIT(pin), mux = s->mux[pin], cfg = s->out_sel[pin];
+        bool level = false, known = false;
+        bool gpio = ((mux >> 12) & 7) == 1;
+        bool awake = !(mux & BIT(1));
+        bool simple = (cfg & 0xff) == 128;
+        if (gpio && awake && simple) {
+            bool enable = !!(s->enable & bit) ^ !!(cfg & BIT(10));
+            bool output = !!(s->out & bit) ^ !!(cfg & BIT(8));
+            /* Open drain high releases the driver. */
+            enable &= !(output && (s->pin[pin] & BIT(2)));
+            s->drive_valid |= bit;
+            if (enable) {
+                s->drive_enable |= bit;
+                if (output) { s->drive_level |= bit; }
+                known = true;
+                level = output;
+            }
+        }
+        if (s->pad_driven & bit) {
+            bool external = !!(s->pad_level & bit);
+            if (known && external != level) {
+                known = false; /* contention is not a valid digital zero */
+            } else {
+                known = true;
+                level = external;
+            }
+        } else if (!known && (s->drive_valid & bit) &&
+                   !(s->drive_enable & bit)) {
+            unsigned pull = (mux >> 7) & 3;
+            known = pull == 1 || pull == 2;
+            level = pull == 2;
+        }
+        /* Simple input does not require selecting the GPIO output function. */
+        if (!(mux & BIT(9))) {
+            level = false;
+            known = true;
+        } else if (!awake || (mux & BIT(15)) || (s->pin[pin] & 0x1b)) {
+            known = false; /* sleep/filter/synchronizer not implemented */
+        }
+        if (known) {
+            s->input_known |= bit;
+            if (level) { s->input |= bit; }
+            bool old = !!(old_input & bit), was_known = !!(old_known & bit);
+            unsigned type = (s->pin[pin] >> 7) & 7;
+            if ((type == 1 && was_known && !old && level) ||
+                (type == 2 && was_known && old && !level) ||
+                (type == 3 && was_known && old != level) ||
+                (type == 4 && !level) || (type == 5 && level)) {
+                s->status |= bit;
+            }
+        }
+    }
+    qemu_set_irq(s->parent.irq, cpu_status(s) != 0);
+    /* Record the actual chip output at every control transition, including Z
+     * and unsupported routing. This is NOT a MOSFET or power model. */
+    uint32_t changed = (old_drive ^ s->drive_level) |
+                       (old_enable ^ s->drive_enable) | (old_valid ^ s->drive_valid);
+    if (changed & BIT(7)) {
+        int drive = !(s->drive_valid & BIT(7)) ? -2 :
+                    !(s->drive_enable & BIT(7)) ? -1 : !!(s->drive_level & BIT(7));
+        qemu_log_mask(LOG_UNIMP, "SMARTVAPE_GPIO time_ns=%" PRId64 " pin=7 drive=%d\n",
+                      qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL), drive);
+    }
 }
 
 static void pad_input(void *opaque, int pin, int level)
 {
     ESP32C3GPIOState *s = opaque;
-    if (pin != 5) {
-        qemu_log_mask(LOG_UNIMP, "SMARTVAPE_UNMODELED GPIO pad %d input\n", pin);
-        return;
+    s->pad_driven |= BIT(pin);
+    s->pad_level = (s->pad_level & ~BIT(pin)) | (level ? BIT(pin) : 0);
+    update(s);
+}
+
+static void pad_release(void *opaque, int pin, int level)
+{
+    ESP32C3GPIOState *s = opaque;
+    if (level) { s->pad_driven &= ~BIT(pin); }
+    update(s);
+}
+
+static void get_pad(Object *obj, Visitor *v, const char *name, void *opaque, Error **errp)
+{
+    uint32_t pin = GPOINTER_TO_UINT(opaque);
+    bool level = !!(ESP32C3_GPIO(obj)->pad_level & BIT(pin));
+    visit_type_bool(v, name, &level, errp);
+}
+
+static void set_pad(Object *obj, Visitor *v, const char *name, void *opaque, Error **errp)
+{
+    bool level;
+    if (visit_type_bool(v, name, &level, errp)) {
+        pad_input(ESP32C3_GPIO(obj), GPOINTER_TO_UINT(opaque), level);
     }
-    s->pad5 = level != 0;
-    input_update(s);
-}
-
-static bool get_pad5(Object *obj, Error **errp)
-{
-    return ESP32C3_GPIO(obj)->pad5;
-}
-
-static void set_pad5(Object *obj, bool level, Error **errp)
-{
-    pad_input(ESP32C3_GPIO(obj), 5, level);
 }
 
 static uint64_t mux_read(void *opaque, hwaddr addr, unsigned size)
 {
-    ESP32C3GPIOState *s = opaque;
-    return s->mux5;
+    return ESP32C3_GPIO(opaque)->mux[addr / 4];
 }
 
 static void mux_write(void *opaque, hwaddr addr, uint64_t value, unsigned size)
 {
     ESP32C3GPIOState *s = opaque;
-    s->mux5 = value & 0xffff;
-    if (value & ((1U << 15) | (1U << 1))) {
-        qemu_log_mask(LOG_UNIMP, "SMARTVAPE_UNMODELED GPIO5 filter/sleep configuration\n");
+    s->mux[addr / 4] = value & 0xffff;
+    if (value & (BIT(15) | BIT(1))) {
+        qemu_log_mask(LOG_UNIMP, "SMARTVAPE_UNMODELED GPIO%u filter/sleep configuration\n", (unsigned)addr / 4);
     }
-    input_update(s);
+    update(s);
 }
 
 static const MemoryRegionOps mux_ops = {
-    .read = mux_read,
-    .write = mux_write,
-    .endianness = DEVICE_LITTLE_ENDIAN,
+    .read = mux_read, .write = mux_write, .endianness = DEVICE_LITTLE_ENDIAN,
     .valid = { .min_access_size = 4, .max_access_size = 4 },
 };
 
 static bool c3_read(Esp32GpioState *parent, hwaddr addr, uint64_t *value)
 {
     ESP32C3GPIOState *s = ESP32C3_GPIO(parent);
+    if (addr >= 0x74 && addr < 0xcc) { *value = s->pin[(addr - 0x74) / 4]; return true; }
+    if (addr >= 0x554 && addr < 0x5ac) { *value = s->out_sel[(addr - 0x554) / 4]; return true; }
     switch (addr) {
     case 0x04: *value = s->out; return true;
     case 0x20: *value = s->enable; return true;
-    case 0x3c: *value = s->input5 ? PIN5_BIT : 0; return true;
+    case 0x3c:
+        if ((~s->input_known & PAD_MASK) & ~s->reported_unknown) {
+            uint32_t unknown = ~s->input_known & PAD_MASK;
+            qemu_log_mask(LOG_UNIMP, "SMARTVAPE_UNMODELED GPIO input unknown_mask=0x%x\n", unknown);
+            s->reported_unknown |= unknown;
+        }
+        *value = s->input; return true;
     case 0x44: *value = s->status; return true;
-    case 0x5c: *value = (s->pin5 & (1U << 13)) ? (s->status & PIN5_BIT) : 0; return true;
-    case 0x88: *value = s->pin5; return true;
+    case 0x5c: *value = cpu_status(s); return true;
     default: return false;
     }
 }
@@ -108,56 +177,69 @@ static bool c3_read(Esp32GpioState *parent, hwaddr addr, uint64_t *value)
 static bool c3_write(Esp32GpioState *parent, hwaddr addr, uint64_t value)
 {
     ESP32C3GPIOState *s = ESP32C3_GPIO(parent);
-    uint32_t bits = value & GPIO_DATA_MASK;
-    switch (addr) {
-    case 0x04: s->out = bits; break;
-    case 0x08: s->out |= bits; break;
-    case 0x0c: s->out &= ~bits; break;
-    case 0x20: s->enable = bits; break;
-    case 0x24: s->enable |= bits; break;
-    case 0x28: s->enable &= ~bits; break;
-    case 0x44: s->status = bits; input_update(s); break;
-    case 0x48: s->status |= bits; input_update(s); break;
-    case 0x4c: s->status &= ~bits; input_update(s); break;
-    case 0x88:
-        s->pin5 = value & 0x3ff9f;
-        if (value & 0x3dc1f) {
-            qemu_log_mask(LOG_UNIMP, "SMARTVAPE_UNMODELED GPIO5 sync/output/wakeup/NMI configuration\n");
+    uint32_t bits = value & DATA_MASK;
+    if (addr >= 0x74 && addr < 0xcc) {
+        s->pin[(addr - 0x74) / 4] = value & 0x3ff9f;
+        if (value & 0x3dc1b) {
+            qemu_log_mask(LOG_UNIMP, "SMARTVAPE_UNMODELED GPIO%u sync/wakeup/NMI configuration\n", (unsigned)(addr - 0x74) / 4);
         }
-        input_update(s);
-        break;
-    default: return false;
+    } else if (addr >= 0x554 && addr < 0x5ac) {
+        s->out_sel[(addr - 0x554) / 4] = value & 0x7ff;
+        if ((value & 0xff) != 128) {
+            qemu_log_mask(LOG_UNIMP, "SMARTVAPE_UNMODELED GPIO%u peripheral output signal=%u\n",
+                          (unsigned)(addr - 0x554) / 4, (unsigned)value & 0xff);
+        }
+    } else {
+        switch (addr) {
+        case 0x04: s->out = bits; break;
+        case 0x08: s->out |= bits; break;
+        case 0x0c: s->out &= ~bits; break;
+        case 0x20: s->enable = bits; break;
+        case 0x24: s->enable |= bits; break;
+        case 0x28: s->enable &= ~bits; break;
+        case 0x44: s->status = bits; break;
+        case 0x48: s->status |= bits; break;
+        case 0x4c: s->status &= ~bits; break;
+        default: return false;
+        }
     }
+    update(s);
     return true;
 }
 
 static void c3_reset(Object *obj, ResetType type)
 {
     ESP32C3GPIOState *s = ESP32C3_GPIO(obj);
-    s->out = 0;
-    s->enable = 0;
-    s->pin5 = 0;
-    s->mux5 = 0xb00;
-    s->status = 0;
-    s->input5 = false;
-    input_update(s);
+    s->out = s->enable = s->status = s->reported_unknown = 0;
+    s->input = s->input_known = 0;
+    for (int pin = 0; pin < 22; pin++) {
+        s->pin[pin] = 0;
+        s->mux[pin] = 0xb00; /* TRM register 5.21 */
+        s->out_sel[pin] = 0x80;
+    }
+    update(s); /* external fixture levels survive a chip reset */
+    qemu_log_mask(LOG_UNIMP, "SMARTVAPE_GPIO time_ns=%" PRId64 " pin=7 drive=-2 reset=1\n",
+                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
 }
 
 static void esp32c3_gpio_init(Object *obj)
 {
-    /* Set the default value for the property */
-    object_property_set_int(obj, "strap_mode", ESP32C3_STRAP_MODE_FLASH_BOOT, &error_fatal);
     ESP32C3GPIOState *s = ESP32C3_GPIO(obj);
+    object_property_set_int(obj, "strap_mode", ESP32C3_STRAP_MODE_FLASH_BOOT, &error_fatal);
     qdev_init_gpio_in_named(DEVICE(obj), pad_input, "pad", 22);
-    object_property_add_bool(obj, "pad5-level", get_pad5, set_pad5);
-    /* Map just GPIO5's four bytes; all other mux registers retain upstream
-     * fallback diagnostics instead of silently appearing implemented. */
-    memory_region_init_io(&s->button_mux, obj, &mux_ops, s, "gpio5-iomux", 4);
-    sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->button_mux);
+    qdev_init_gpio_in_named(DEVICE(obj), pad_release, "release-pad", 22);
+    for (int pin = 0; pin < 22; pin++) {
+        g_autofree char *name = g_strdup_printf("pad%d-level", pin);
+        object_property_add(obj, name, "bool", get_pad, set_pad, NULL, GUINT_TO_POINTER(pin));
+    }
+    object_property_add_uint32_ptr(obj, "drive-level", &s->drive_level, OBJ_PROP_FLAG_READ);
+    object_property_add_uint32_ptr(obj, "drive-enable", &s->drive_enable, OBJ_PROP_FLAG_READ);
+    object_property_add_uint32_ptr(obj, "drive-valid", &s->drive_valid, OBJ_PROP_FLAG_READ);
+    object_property_add_uint32_ptr(obj, "input-known", &s->input_known, OBJ_PROP_FLAG_READ);
+    memory_region_init_io(&s->mux_regs, obj, &mux_ops, s, "gpio-iomux", 22 * 4);
+    sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->mux_regs);
 }
 
-/* If we need to override any function from the parent (reset, realize, ...), it shall be done
- * in this class_init function */
 static void esp32c3_gpio_class_init(ObjectClass *klass, void *data)
 {
     Esp32GpioClass *gpio = ESP32_GPIO_CLASS(klass);
@@ -167,17 +249,10 @@ static void esp32c3_gpio_class_init(ObjectClass *klass, void *data)
 }
 
 static const TypeInfo esp32c3_gpio_info = {
-    .name = TYPE_ESP32C3_GPIO,
-    .parent = TYPE_ESP32_GPIO,
-    .instance_size = sizeof(ESP32C3GPIOState),
-    .instance_init = esp32c3_gpio_init,
-    .class_init = esp32c3_gpio_class_init,
-    .class_size = sizeof(ESP32C3GPIOClass),
+    .name = TYPE_ESP32C3_GPIO, .parent = TYPE_ESP32_GPIO,
+    .instance_size = sizeof(ESP32C3GPIOState), .instance_init = esp32c3_gpio_init,
+    .class_init = esp32c3_gpio_class_init, .class_size = sizeof(ESP32C3GPIOClass),
 };
 
-static void esp32c3_gpio_register_types(void)
-{
-    type_register_static(&esp32c3_gpio_info);
-}
-
+static void esp32c3_gpio_register_types(void) { type_register_static(&esp32c3_gpio_info); }
 type_init(esp32c3_gpio_register_types)

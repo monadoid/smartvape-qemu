@@ -18,17 +18,28 @@ manual and the esp32c3 0.32.2 register definitions. QTest read/write sequences
 exercise reset values, set/clear semantics, masking and independent output-enable
 state from the Smart Vape Rust runner.
 
-GPIO5 now accepts an externally driven digital input, models its awake input
-enable and edge/level interrupt latch, and connects its CPU interrupt to the
-upstream interrupt matrix. QTest uses the named `pad` input; QMP can drive the
-same path through `/machine/gpio` property `pad5-level`. IO_MUX mapping covers
-only GPIO5; other mux and pin registers retain fallback diagnostics. Global
-input/status reads cover this slice only, not other pins. Normal digital input
-tests do not validate synchronizer delay, analog thresholds, filters, NMI,
-sleep/wakeup, contact dynamics or supply behavior. Unsupported GPIO5 modes log
-diagnostics. Source: ESP32-C3 TRM v1.4 chapter 5 and production esp32c3 0.32.2 PAC.
+The awake GPIO implementation covers the 22 digital input/interrupt registers,
+IO MUX registers, and simple GPIO output routing (signal 128). Output data and
+enable inversion, open-drain release, and weak pulls in the simple GPIO fixture
+are modeled. The shared CPU IRQ reflects all enabled pending pins. The Rust
+runner tests GPIO5, pod GPIO1, charger GPIO3/10, and GPIO7 output feedback.
 
-This is bring-up work, not a complete board emulator. Other GPIO pad routing,
-interrupts, ADC, RMT, USB behavior and electrical power models remain incomplete.
+QTest drives named `pad` inputs (driving a pin marks it externally driven);
+`release-pad` releases them. QMP uses `padN-level` on `/machine/gpio`. Read-only
+`drive-level`, `drive-enable`, `drive-valid`, and `input-known` masks distinguish
+low, high impedance and unknown. External digital contention is unknown. Unknown
+input bits return zero with an explicit diagnostic, and cannot count as accepted
+physical input. Non-GPIO peripheral routing is still unsupported. Default mux
+readback follows TRM register 5.21; direct peripheral reset-pad behavior is not
+inferred from that register value.
+
+GPIO7 changes are logged with QEMU virtual timestamps; drive -2 means unknown,
+-1 means high impedance, and 0/1 means a digital output. They are not a MOSFET,
+gate voltage or load-current simulation. Tests do not validate synchronizer
+delay, analog thresholds, filters, NMI, sleep/wakeup, contact dynamics, JTAG
+ownership, pad hold or supply behavior. Unsupported modes retain diagnostics.
+
+This is bring-up work, not a complete board emulator. Peripheral GPIO routing,
+ADC, RMT, USB behavior and electrical power models remain incomplete.
 An unsupported access is not a successful test. Existing upstream behavior may
 also contain approximations that have not yet been audited.
