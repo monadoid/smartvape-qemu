@@ -12,6 +12,7 @@
 #include "hw/hw.h"
 #include "hw/sysbus.h"
 #include "hw/registerfields.h"
+#include "chardev/char-fe.h"
 
 #define TYPE_ESP32C3_JTAG "misc.esp32c3.usb_serial_jtag"
 #define ESP32C3_JTAG(obj) OBJECT_CHECK(ESP32C3UsbJtagState, (obj), TYPE_ESP32C3_JTAG)
@@ -22,5 +23,8 @@
 typedef struct ESP32C3UsbJtagState {
     SysBusDevice parent_object;
     MemoryRegion iomem;
+    CharBackend chr;
+    uint8_t tx[64];
+    unsigned count;
+    bool submitted;
 } ESP32C3UsbJtagState;
-

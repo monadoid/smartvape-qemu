@@ -1,96 +1,83 @@
-/*
- * ESP32-C3 USB Serial JTAG emulation
- *
- * Copyright (c) 2023 Espressif Systems (Shanghai) Co. Ltd.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 or
- * (at your option) any later version.
+/* ESP32-C3 USB serial TX FIFO, TRM v1.4 30.6 registers 30.6/30.10.
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ * Explicit console fixture: chardev is an immediately consuming host. Without
+ * it the submitted/full FIFO remains blocked. No USB PHY, enumeration, JTAG,
+ * RX or USB interrupts are claimed. USB VBUS is an independent board input.
  */
 #include "qemu/osdep.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
-#include "qemu/error-report.h"
-#include "hw/hw.h"
-#include "hw/sysbus.h"
+#include "hw/qdev-properties.h"
+#include "hw/qdev-properties-system.h"
 #include "hw/misc/esp32c3_jtag.h"
 
-
-static uint64_t esp32c3_jtag_read(void *opaque, hwaddr addr, unsigned int size)
+static void submit(ESP32C3UsbJtagState *s)
 {
-    static bool seen[0x1000];
-    if (addr < sizeof(seen) && !seen[addr]) {
-        seen[addr] = true;
-        qemu_log_mask(LOG_UNIMP, "SMARTVAPE_UNMODELED read 0x%08" HWADDR_PRIx " size=%u (esp32c3_jtag)\n",
-                      (hwaddr)0x60043000 + addr, size);
+    s->submitted = true;
+    if (qemu_chr_fe_backend_connected(&s->chr)) {
+        int written = qemu_chr_fe_write_all(&s->chr, s->tx, s->count);
+        if (written == s->count) {
+            s->count = 0;
+            s->submitted = false;
+        } else {
+            qemu_log_mask(LOG_UNIMP, "SMARTVAPE_UNMODELED USB console backend failed\n");
+        }
     }
-
-    ESP32C3UsbJtagState *s = ESP32C3_JTAG(opaque);
-    (void) s;
+}
+static uint64_t read_reg(void *opaque, hwaddr addr, unsigned size)
+{
+    ESP32C3UsbJtagState *s = opaque;
+    if (addr == 4) {
+        return (!s->submitted && s->count < sizeof(s->tx)) ? BIT(1) : 0;
+    }
+    qemu_log_mask(LOG_UNIMP, "SMARTVAPE_UNMODELED USB read offset=0x%" HWADDR_PRIx "\n", addr);
     return 0;
 }
-
-static void esp32c3_jtag_write(void *opaque, hwaddr addr, uint64_t value, unsigned int size)
+static void write_reg(void *opaque, hwaddr addr, uint64_t value, unsigned size)
 {
-    static bool seen[0x1000];
-    if (addr < sizeof(seen) && !seen[addr]) {
-        seen[addr] = true;
-        qemu_log_mask(LOG_UNIMP, "SMARTVAPE_UNMODELED write 0x%08" HWADDR_PRIx " size=%u (esp32c3_jtag)\n",
-                      (hwaddr)0x60043000 + addr, size);
+    ESP32C3UsbJtagState *s = opaque;
+    if (addr == 0) {
+        if (!s->submitted && s->count < sizeof(s->tx)) {
+            s->tx[s->count++] = value;
+            if (s->count == sizeof(s->tx)) { submit(s); }
+        } else {
+            qemu_log_mask(LOG_GUEST_ERROR, "USB serial write while FIFO unavailable\n");
+        }
+    } else if (addr == 4) {
+        if (value & 1) { submit(s); }
+    } else {
+        qemu_log_mask(LOG_UNIMP, "SMARTVAPE_UNMODELED USB write offset=0x%" HWADDR_PRIx "\n", addr);
     }
-
-    ESP32C3UsbJtagState *s = ESP32C3_JTAG(opaque);
-    (void) s;
 }
-
-static const MemoryRegionOps esp32c3_jtag_ops = {
-    .read =  esp32c3_jtag_read,
-    .write = esp32c3_jtag_write,
-    .endianness = DEVICE_LITTLE_ENDIAN,
+static const MemoryRegionOps ops = {
+    .read = read_reg, .write = write_reg, .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 4, .max_access_size = 4 },
 };
-
-static void esp32c3_jtag_reset_hold(Object *obj, ResetType type)
-{
-    (void) obj;
-    (void) type;
-}
-
-static void esp32c3_jtag_realize(DeviceState *dev, Error **errp)
-{
-    (void) dev;
-    (void) errp;
-}
-
-static void esp32c3_jtag_init(Object *obj)
+static void reset(Object *obj, ResetType type)
 {
     ESP32C3UsbJtagState *s = ESP32C3_JTAG(obj);
-    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
-
-    memory_region_init_io(&s->iomem, obj, &esp32c3_jtag_ops, s,
-                          TYPE_ESP32C3_JTAG, ESP32C3_JTAG_REGS_SIZE);
-    sysbus_init_mmio(sbd, &s->iomem);
+    s->count = 0;
+    s->submitted = false;
 }
-
-static void esp32c3_jtag_class_init(ObjectClass *klass, void *data)
+static void init(Object *obj)
 {
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    ResettableClass *rc = RESETTABLE_CLASS(klass);
-
-    rc->phases.hold = esp32c3_jtag_reset_hold;
-    dc->realize = esp32c3_jtag_realize;
+    ESP32C3UsbJtagState *s = ESP32C3_JTAG(obj);
+    memory_region_init_io(&s->iomem, obj, &ops, s, TYPE_ESP32C3_JTAG, ESP32C3_JTAG_REGS_SIZE);
+    sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
 }
-
-static const TypeInfo esp32c3_jtag_info = {
-    .name = TYPE_ESP32C3_JTAG,
-    .parent = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(ESP32C3UsbJtagState),
-    .instance_init = esp32c3_jtag_init,
-    .class_init = esp32c3_jtag_class_init
+static Property properties[] = {
+    DEFINE_PROP_CHR("chardev", ESP32C3UsbJtagState, chr),
+    DEFINE_PROP_END_OF_LIST(),
 };
-
-static void esp32c3_jtag_types(void)
+static void class_init(ObjectClass *klass, void *data)
 {
-    type_register_static(&esp32c3_jtag_info);
+    RESETTABLE_CLASS(klass)->phases.hold = reset;
+    device_class_set_props(DEVICE_CLASS(klass), properties);
 }
-
-type_init(esp32c3_jtag_types)
+static const TypeInfo info = {
+    .name = TYPE_ESP32C3_JTAG, .parent = TYPE_SYS_BUS_DEVICE,
+    .instance_size = sizeof(ESP32C3UsbJtagState), .instance_init = init,
+    .class_init = class_init,
+};
+static void register_type(void) { type_register_static(&info); }
+type_init(register_type)

@@ -47,6 +47,7 @@
 #include "hw/misc/esp32c3_ds.h"
 #include "hw/misc/esp32c3_xts_aes.h"
 #include "hw/misc/esp32c3_jtag.h"
+#include "hw/misc/esp32c3_rmt.h"
 #include "hw/dma/esp32c3_gdma.h"
 #include "hw/display/esp_rgb.h"
 #include "hw/net/can/esp32c3_twai.h"
@@ -88,6 +89,7 @@ struct Esp32C3MachineState {
     ESP32C3SpiState spi1;
     ESP32C3RtcCntlState rtccntl;
     ESP32C3UsbJtagState jtag;
+    ESP32C3RmtState rmt;
     ESPRgbState rgb;
     Esp32C3TWAIState twai;
 };
@@ -443,6 +445,8 @@ static void esp32c3_machine_init(MachineState *machine)
     object_initialize_child(OBJECT(machine), "spi1", &ms->spi1, TYPE_ESP32C3_SPI);
     object_initialize_child(OBJECT(machine), "rtccntl", &ms->rtccntl, TYPE_ESP32C3_RTC_CNTL);
     object_initialize_child(OBJECT(machine), "jtag", &ms->jtag, TYPE_ESP32C3_JTAG);
+    object_initialize_child(OBJECT(machine), "rmt", &ms->rmt, TYPE_ESP32C3_RMT);
+    object_property_add_alias(OBJECT(machine), "usb-console", OBJECT(&ms->jtag), "chardev");
     object_initialize_child(OBJECT(machine), "rgb", &ms->rgb, TYPE_ESP_RGB);
     object_initialize_child(OBJECT(machine), "twai", &ms->twai, TYPE_ESP32C3_TWAI);
 
@@ -474,6 +478,21 @@ static void esp32c3_machine_init(MachineState *machine)
         sysbus_realize(SYS_BUS_DEVICE(&ms->jtag), &error_fatal);
         MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&ms->jtag), 0);
         memory_region_add_subregion_overlap(sys_mem, DR_REG_USB_SERIAL_JTAG_BASE, mr, 0);
+    }
+
+    /* RTC CNTL realization */
+    {
+        sysbus_realize(SYS_BUS_DEVICE(&ms->rmt), &error_fatal);
+        for (int i = 0; i < 2; i++) {
+            memory_region_add_subregion_overlap(sys_mem, DR_REG_RMT_BASE + (i ? 0x400 : 0),
+                sysbus_mmio_get_region(SYS_BUS_DEVICE(&ms->rmt), i), 0);
+            qdev_connect_gpio_out_named(DEVICE(&ms->rmt), "tx-level", i,
+                qdev_get_gpio_in_named(DEVICE(&ms->gpio), "rmt-level", i));
+            qdev_connect_gpio_out_named(DEVICE(&ms->rmt), "tx-enable", i,
+                qdev_get_gpio_in_named(DEVICE(&ms->gpio), "rmt-enable", i));
+        }
+        sysbus_connect_irq(SYS_BUS_DEVICE(&ms->rmt), 0,
+            qdev_get_gpio_in(intmatrix_dev, ETS_RMT_INTR_SOURCE));
     }
 
     /* RTC CNTL realization */

@@ -18,6 +18,7 @@
 #include "hw/irq.h"
 #include "hw/qdev-properties.h"
 #include "sysemu/reset.h"
+#include "sysemu/tcg.h"
 #include "esp_cpu.h"
 
 #define BIT_SET(reg, bit)   ((reg) & BIT(bit))
@@ -277,7 +278,10 @@ static void esp_cpu_init(Object *obj)
 
     /* Since the TCG operations are now separated from the standard RISC-V CPU, we have to override
      * the TCG operations in this init function instead of the class init */
-    esp_cpu_override_tcg_interrupts(obj);
+    /* QTest has no TCG class. It exercises peripherals without executing a CPU. */
+    if (tcg_enabled()) {
+        esp_cpu_override_tcg_interrupts(obj);
+    }
 
     /* Initialize the IRQ lines */
     qdev_init_gpio_in_named_with_opaque(DEVICE(s),

@@ -210,4 +210,5 @@ specific_ss.add(when: 'CONFIG_MIPS_ITU', if_true: files('mips_itu.c'))
 system_ss.add(when: 'CONFIG_SBSA_REF', if_true: files('sbsa_ec.c'))
 
 # HPPA devices
+system_ss.add(when: 'CONFIG_RISCV_ESP32C3', if_true: files('esp32c3_rmt.c'))
 system_ss.add(when: 'CONFIG_LASI', if_true: files('lasi.c'))

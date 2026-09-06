@@ -27,6 +27,7 @@ typedef struct ESP32C3State {
     uint32_t pad_level, pad_driven;
     uint32_t input, input_known, reported_unknown;
     uint32_t drive_level, drive_enable, drive_valid;
+    uint32_t rmt_level, rmt_enable;
 } ESP32C3GPIOState;
 
 typedef struct ESP32C3GPIOClass {

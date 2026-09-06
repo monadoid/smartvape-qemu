@@ -43,9 +43,16 @@ static void update(ESP32C3GPIOState *s)
         bool gpio = ((mux >> 12) & 7) == 1;
         bool awake = !(mux & BIT(1));
         bool simple = (cfg & 0xff) == 128;
-        if (gpio && awake && simple) {
-            bool enable = !!(s->enable & bit) ^ !!(cfg & BIT(10));
-            bool output = !!(s->out & bit) ^ !!(cfg & BIT(8));
+        unsigned signal = cfg & 0xff;
+        bool rmt = signal == 51 || signal == 52;
+        if (gpio && awake && (simple || rmt)) {
+            bool source_enable = simple || (cfg & BIT(9)) ?
+                                 !!(s->enable & bit) :
+                                 !!(s->rmt_enable & BIT(signal - 51));
+            bool source_level = simple ? !!(s->out & bit) :
+                                !!(s->rmt_level & BIT(signal - 51));
+            bool enable = source_enable ^ !!(cfg & BIT(10));
+            bool output = source_level ^ !!(cfg & BIT(8));
             /* Open drain high releases the driver. */
             enable &= !(output && (s->pin[pin] & BIT(2)));
             s->drive_valid |= bit;
@@ -95,12 +102,28 @@ static void update(ESP32C3GPIOState *s)
      * and unsupported routing. This is NOT a MOSFET or power model. */
     uint32_t changed = (old_drive ^ s->drive_level) |
                        (old_enable ^ s->drive_enable) | (old_valid ^ s->drive_valid);
-    if (changed & BIT(7)) {
-        int drive = !(s->drive_valid & BIT(7)) ? -2 :
-                    !(s->drive_enable & BIT(7)) ? -1 : !!(s->drive_level & BIT(7));
-        qemu_log_mask(LOG_UNIMP, "SMARTVAPE_GPIO time_ns=%" PRId64 " pin=7 drive=%d\n",
-                      qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL), drive);
+    for (unsigned pin = 6; pin <= 7; pin++) {
+        if (changed & BIT(pin)) {
+            int drive = !(s->drive_valid & BIT(pin)) ? -2 :
+                        !(s->drive_enable & BIT(pin)) ? -1 : !!(s->drive_level & BIT(pin));
+            qemu_log_mask(LOG_UNIMP, "SMARTVAPE_GPIO time_ns=%" PRId64 " pin=%u drive=%d\n",
+                          qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL), pin, drive);
+        }
     }
+}
+
+static void rmt_level(void *opaque, int channel, int level)
+{
+    ESP32C3GPIOState *s = opaque;
+    s->rmt_level = (s->rmt_level & ~BIT(channel)) | (level ? BIT(channel) : 0);
+    update(s);
+}
+
+static void rmt_enable(void *opaque, int channel, int level)
+{
+    ESP32C3GPIOState *s = opaque;
+    s->rmt_enable = (s->rmt_enable & ~BIT(channel)) | (level ? BIT(channel) : 0);
+    update(s);
 }
 
 static void pad_input(void *opaque, int pin, int level)
@@ -185,7 +208,7 @@ static bool c3_write(Esp32GpioState *parent, hwaddr addr, uint64_t value)
         }
     } else if (addr >= 0x554 && addr < 0x5ac) {
         s->out_sel[(addr - 0x554) / 4] = value & 0x7ff;
-        if ((value & 0xff) != 128) {
+        if ((value & 0xff) != 128 && (value & 0xff) != 51 && (value & 0xff) != 52) {
             qemu_log_mask(LOG_UNIMP, "SMARTVAPE_UNMODELED GPIO%u peripheral output signal=%u\n",
                           (unsigned)(addr - 0x554) / 4, (unsigned)value & 0xff);
         }
@@ -228,6 +251,8 @@ static void esp32c3_gpio_init(Object *obj)
     object_property_set_int(obj, "strap_mode", ESP32C3_STRAP_MODE_FLASH_BOOT, &error_fatal);
     qdev_init_gpio_in_named(DEVICE(obj), pad_input, "pad", 22);
     qdev_init_gpio_in_named(DEVICE(obj), pad_release, "release-pad", 22);
+    qdev_init_gpio_in_named(DEVICE(obj), rmt_level, "rmt-level", 2);
+    qdev_init_gpio_in_named(DEVICE(obj), rmt_enable, "rmt-enable", 2);
     for (int pin = 0; pin < 22; pin++) {
         g_autofree char *name = g_strdup_printf("pad%d-level", pin);
         object_property_add(obj, name, "bool", get_pad, set_pad, NULL, GUINT_TO_POINTER(pin));
